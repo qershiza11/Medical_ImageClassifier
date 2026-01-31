@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+
+# Datasets
+brainstoke1/
+chestXray/
+
+# Model weights
+*.keras
+best_checkpoint.keras
+
+# OS
+.DS_Store
