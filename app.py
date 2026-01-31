@@ -1,11 +1,25 @@
-import streamlit as st
+# app.py
+from __future__ import annotations
+
+from pathlib import Path
+import json
+
 import numpy as np
 from PIL import Image
-import tensorflow as tf
-from tensorflow import keras
+import streamlit as st
 
-MODEL_PATH = "brain_tumour_model.keras"
-CLASS_NAMES_PATH = "class_names.txt"
+# Import TensorFlow inside cached loader to reduce reruns and keep startup cleaner
+# (still fine locally and on Streamlit Cloud)
+
+
+# ---------- Paths (robust for local + Streamlit Cloud) ----------
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "brain_tumour_model.keras"
+
+# Prefer a TXT if you have it, otherwise fall back to your uploaded JSON
+CLASS_NAMES_TXT = BASE_DIR / "class_names.txt"
+CLASS_NAMES_JSON = BASE_DIR / "brain_tumour_class_names.json"
+
 IMG_SIZE = (224, 224)
 
 st.set_page_config(
@@ -36,35 +50,72 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+def _load_class_names() -> list[str]:
+    if CLASS_NAMES_TXT.exists():
+        return [
+            line.strip()
+            for line in CLASS_NAMES_TXT.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    if CLASS_NAMES_JSON.exists():
+        data = json.loads(CLASS_NAMES_JSON.read_text(encoding="utf-8"))
+        if isinstance(data, list) and all(isinstance(x, str) for x in data):
+            return data
+        raise ValueError("brain_tumour_class_names.json must be a JSON list of strings.")
+
+    raise FileNotFoundError(
+        "Missing class names file. Add class_names.txt or brain_tumour_class_names.json next to app.py"
+    )
+
+
 @st.cache_resource
 def load_model_and_classes():
+    import tensorflow as tf  # noqa: F401
+    from tensorflow import keras
+
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            "Model file not found: brain_tumour_model.keras (must be next to app.py)"
+        )
+
     model = keras.models.load_model(MODEL_PATH)
-    with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as f:
-        class_names = [line.strip() for line in f if line.strip()]
+    class_names = _load_class_names()
     return model, class_names
 
+
 def preprocess_image(pil_img: Image.Image) -> np.ndarray:
+    import tensorflow as tf
+
     img = pil_img.convert("RGB").resize(IMG_SIZE)
     x = np.array(img, dtype=np.float32)
     x = np.expand_dims(x, axis=0)
     x = tf.keras.applications.efficientnet.preprocess_input(x)
     return x
 
+
 # ---- Header ----
 st.title("Brain Tumour MRI Classifier")
 st.write("Upload an MRI image to get a prediction and confidence.")
 
-# ---- Options (better than sidebar on mobile) ----
+# ---- Options ----
 with st.expander("Options", expanded=False):
     show_probs = st.checkbox("Show class probabilities", value=True)
     threshold = st.slider("Confidence threshold", 0.0, 1.0, 0.60, 0.01)
     show_topk = st.checkbox("Show top 2 predictions", value=True)
 
-model, class_names = load_model_and_classes()
+# ---- Load assets with clear errors ----
+try:
+    model, class_names = load_model_and_classes()
+except Exception as e:
+    st.error(f"App failed to start: {e}")
+    st.stop()
 
 uploaded = st.file_uploader("Upload an image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
-col1, col2 = st.columns([1, 1], vertical_alignment="top")
+# Avoid newer Streamlit args that may break on older deployments
+col1, col2 = st.columns([1, 1])
 
 with col1:
     if uploaded is None:
@@ -73,22 +124,23 @@ with col1:
             <div class="card">
               <b>How to use</b>
               <p class="small">1) Upload a JPG/PNG MRI image<br/>
-              2) The model predicts: glioma, meningioma, notumor, pituitary</p>
+              2) The model predicts a tumour class with confidence</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        pil_img = None
     else:
         pil_img = Image.open(uploaded)
         st.image(pil_img, caption="Uploaded image", use_container_width=True)
 
 with col2:
-    if uploaded is not None:
-        pil_img = Image.open(uploaded)
+    if pil_img is not None:
         x = preprocess_image(pil_img)
 
-        probs = model.predict(x, verbose=0)[0]
-        probs = probs.astype(float)
+        probs = model.predict(x, verbose=0)[0].astype(float)
+        if probs.ndim != 1:
+            probs = np.ravel(probs)
 
         top_idx = int(np.argmax(probs))
         top_label = class_names[top_idx] if top_idx < len(class_names) else f"class_{top_idx}"
@@ -107,7 +159,7 @@ with col2:
             lines = []
             for i in top2:
                 label = class_names[i] if i < len(class_names) else f"class_{i}"
-                lines.append(f"- {label}: {probs[i]:.3f}")
+                lines.append(f"- {label}: {float(probs[i]):.3f}")
             st.markdown("**Top predictions**\n" + "\n".join(lines))
 
         st.markdown(
@@ -118,7 +170,10 @@ with col2:
 
         if show_probs:
             st.subheader("Class probabilities")
-            # Sort for readability on mobile
             order = np.argsort(probs)[::-1]
-            prob_table = {class_names[i]: float(probs[i]) for i in order if i < len(class_names)}
-            st.bar_chart(prob_table, horizontal=True)
+            prob_table = {
+                (class_names[i] if i < len(class_names) else f"class_{i}"): float(probs[i])
+                for i in order
+            }
+            # Avoid horizontal=True for compatibility with older Streamlit versions
+            st.bar_chart(prob_table)

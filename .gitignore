@@ -11,7 +11,7 @@ brainstoke1/
 chestXray/
 
 # Model weights
-*.keras
+
 best_checkpoint.keras
 
 # OS
